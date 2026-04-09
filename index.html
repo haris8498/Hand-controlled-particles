@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Hand-Controlled 3D Particle System | Three.js</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: 'Segoe UI', 'Poppins', 'Arial', sans-serif;
+        }
+        .gesture-status {
+            background: #ff4757;
+            padding: 6px 14px;
+            border-radius: 40px;
+            font-weight: bold;
+            letter-spacing: 1px;
+        }
+        .mode-badge {
+            background: #2ed573;
+            padding: 6px 14px;
+            border-radius: 40px;
+            font-weight: bold;
+        }
+        .instruction {
+            font-size: 11px;
+            opacity: 0.8;
+        }
+        @media (max-width: 700px) {
+            .gesture-status, .mode-badge { padding: 4px 10px; }
+        }
+        #webcam-overlay {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            border-radius: 16px;
+            overflow: hidden;
+            border: 2px solid rgba(255,255,255,0.6);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+            z-index: 15;
+            opacity: 0.85;
+            transition: 0.2s;
+            pointer-events: none;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1);
+        }
+        .title {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.5);
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            color: #ccc;
+            font-family: monospace;
+            pointer-events: none;
+            z-index: 10;
+        }
+        #footer-text {
+            position: absolute;
+            left: 50%;
+            bottom: 15px;
+            transform: translateX(-50%);
+            color: rgba(255,255,255,0.8);
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            font-family: 'Segoe UI', 'Poppins', 'Arial', sans-serif;
+            pointer-events: none;
+            z-index: 10;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="webcam-overlay">
+        <video id="webcam" autoplay playsinline muted></video>
+    </div>
+    <div id="footer-text">Developed by Haris and Mahnoor</div>
+
+    <!-- Import Three.js core and add-ons -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.128.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.128.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        
+        // --- setup scene, camera, renderer ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x050b1a);
+        scene.fog = new THREE.FogExp2(0x050b1a, 0.008);
+        
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 2, 12);
+        camera.lookAt(0, 0, 0);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        renderer.toneMapping = THREE.ReinhardToneMapping;
+        document.body.appendChild(renderer.domElement);
+        
+        // post-processing bloom for magical look
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.2, 0.3, 0.85);
+        bloomPass.threshold = 0.1;
+        bloomPass.strength = 0.8;
+        bloomPass.radius = 0.5;
+        const effectComposer = new EffectComposer(renderer);
+        effectComposer.addPass(renderScene);
+        effectComposer.addPass(bloomPass);
+        
+        // subtle orbit controls for optional manual interaction, but disabled by default
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.enableZoom = true;
+        controls.autoRotate = false;
+        controls.enablePan = false;
+        controls.zoomSpeed = 0.8;
+        
+        // --- particle system core ---
+        const PARTICLE_COUNT = 18000;
+        let positionsAttribute, colorsAttribute;
+        let particleGeometry, particleMaterial, particleSystem;
+        
+        // dynamic behavior state
+        let currentMode = 'heart';      // 'heart', 'flower', 'saturn', 'fireworks'
+        let expansionFactor = 1.0;       // controlled by pinch gesture (0.5 -> 2.0)
+        let targetExpansion = 1.0;
+        let colorHueShift = 0.0;          // controlled by peace gesture
+        let targetHueShift = 0.0;
+        let fireworksTrigger = false;
+        let fireworksIntensity = 0.0;
+        
+        // store base positions and colors for each mode
+        let basePositions = new Array(PARTICLE_COUNT).fill().map(() => new THREE.Vector3());
+        let modePositions = {
+            heart: new Float32Array(PARTICLE_COUNT * 3),
+            flower: new Float32Array(PARTICLE_COUNT * 3),
+            saturn: new Float32Array(PARTICLE_COUNT * 3),
+            fireworks: new Float32Array(PARTICLE_COUNT * 3)
+        };
+        let modeColors = {
+            heart: new Float32Array(PARTICLE_COUNT * 3),
+            flower: new Float32Array(PARTICLE_COUNT * 3),
+            saturn: new Float32Array(PARTICLE_COUNT * 3),
+            fireworks: new Float32Array(PARTICLE_COUNT * 3)
+        };
+        
+        // helper: generate positions for heart shape (parametric)
+        function heartPosition(t) {
+            // t in [0, 2PI)
+            const x = 16 * Math.pow(Math.sin(t), 3);
+            const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+            return new THREE.Vector3(x * 0.07, y * 0.07, 0);
+        }
+        
+        function flowerPosition(t, rScale = 1.0) {
+            // radial + petal effect
+            const petals = 6;
+            const r = 1.2 + 0.45 * Math.sin(petals * t);
+            const x = r * Math.cos(t) * 1.1;
+            const y = r * Math.sin(t) * 0.9;
+            return new THREE.Vector3(x * 1.3, y * 1.2, Math.sin(t * 3) * 0.4);
+        }
+        
+        function saturnPosition(angle, ringFactor) {
+            // ringFactor from -1 to 1 for variation
+            const radius = 1.4 + ringFactor * 0.5;
+            const x = Math.cos(angle) * radius;
+            const z = Math.sin(angle) * radius;
+            const y = Math.sin(angle * 3) * 0.2 + ringFactor * 0.3;
+            return new THREE.Vector3(x * 1.2, y * 1.0, z * 1.2);
+        }
+        
+        function fireworksPosition(idx) {
+            // random radial burst style
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            const r = Math.pow(Math.random(), 1.5) * 3.2;
+            const x = r * Math.sin(phi) * Math.cos(theta);
+            const y = r * Math.sin(phi) * Math.sin(theta) * 0.8;
+            const z = r * Math.cos(phi) * 1.2;
+            return new THREE.Vector3(x, y + 0.5, z);
+        }
+        
+        // fill all mode positions
+        for (let i = 0; i < PARTICLE_COUNT; i++) {
+            const t = (i / PARTICLE_COUNT) * Math.PI * 2;
+            // heart
+            const hPos = heartPosition(t);
+            modePositions.heart[i*3] = hPos.x;
+            modePositions.heart[i*3+1] = hPos.y;
+            modePositions.heart[i*3+2] = hPos.z + (Math.sin(t * 5) * 0.1);
+            
+            // flower
+            const fPos = flowerPosition(t);
+            modePositions.flower[i*3] = fPos.x;
+            modePositions.flower[i*3+1] = fPos.y;
+            modePositions.flower[i*3+2] = fPos.z;
+            
+            // saturn
+            const ringVal = Math.sin(t * 4) * 0.8;
+            const sPos = saturnPosition(t, ringVal);
+            modePositions.saturn[i*3] = sPos.x;
+            modePositions.saturn[i*3+1] = sPos.y;
+            modePositions.saturn[i*3+2] = sPos.z;
+            
+            // fireworks (randomized but consistent per index for smooth morphing)
+            const fwPos = fireworksPosition(i);
+            modePositions.fireworks[i*3] = fwPos.x;
+            modePositions.fireworks[i*3+1] = fwPos.y;
+            modePositions.fireworks[i*3+2] = fwPos.z;
+            
+            // define color palettes per mode (RGB)
+            // Heart: passionate reds/pinks
+            const rHeart = 0.9 + Math.sin(t) * 0.2;
+            const gHeart = 0.2 + Math.cos(t * 2) * 0.2;
+            const bHeart = 0.4 + Math.sin(t * 1.5) * 0.2;
+            modeColors.heart[i*3] = rHeart;
+            modeColors.heart[i*3+1] = gHeart;
+            modeColors.heart[i*3+2] = bHeart;
+            
+            // Flower: vibrant yellows/oranges/purples
+            const rFlower = 0.8 + Math.sin(t) * 0.4;
+            const gFlower = 0.5 + Math.cos(t * 2) * 0.5;
+            const bFlower = 0.3 + Math.sin(t * 3) * 0.6;
+            modeColors.flower[i*3] = rFlower;
+            modeColors.flower[i*3+1] = gFlower;
+            modeColors.flower[i*3+2] = bFlower;
+            
+            // Saturn: golden and icy blues
+            const rSat = 0.9 + Math.cos(t) * 0.2;
+            const gSat = 0.7 + Math.sin(t * 2) * 0.3;
+            const bSat = 0.5 + Math.cos(t * 3) * 0.5;
+            modeColors.saturn[i*3] = rSat;
+            modeColors.saturn[i*3+1] = gSat;
+            modeColors.saturn[i*3+2] = bSat;
+            
+            // Fireworks: explosive random bright colors
+            const hue = Math.random();
+            const rgb = new THREE.Color().setHSL(hue, 1.0, 0.6);
+            modeColors.fireworks[i*3] = rgb.r;
+            modeColors.fireworks[i*3+1] = rgb.g;
+            modeColors.fireworks[i*3+2] = rgb.b;
+        }
+        
+        // initialize geometry with default heart positions
+        particleGeometry = new THREE.BufferGeometry();
+        const initialPositions = modePositions.heart.slice();
+        const initialColors = modeColors.heart.slice();
+        particleGeometry.setAttribute('position', new THREE.BufferAttribute(initialPositions, 3));
+        particleGeometry.setAttribute('color', new THREE.BufferAttribute(initialColors, 3));
+        
+        const particleTexture = (() => {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'white';
+            ctx.arc(16, 16, 14, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+            ctx.arc(16, 16, 6, 0, 2 * Math.PI);
+            ctx.fill();
+            return new THREE.CanvasTexture(canvas);
+        })();
+        
+        particleMaterial = new THREE.PointsMaterial({
+            size: 0.12,
+            vertexColors: true,
+            blending: THREE.AdditiveBlending,
+            map: particleTexture,
+            transparent: true,
+            opacity: 0.95
+        });
+        
+        particleSystem = new THREE.Points(particleGeometry, particleMaterial);
+        scene.add(particleSystem);
+        
+        // add subtle starfield background
+        const starGeometry = new THREE.BufferGeometry();
+        const starCount = 1200;
+        const starPositions = new Float32Array(starCount * 3);
+        for (let i = 0; i < starCount; i++) {
+            starPositions[i*3] = (Math.random() - 0.5) * 200;
+            starPositions[i*3+1] = (Math.random() - 0.5) * 100;
+            starPositions[i*3+2] = (Math.random() - 0.5) * 80 - 40;
+        }
+        starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+        const starMaterial = new THREE.PointsMaterial({ color: 0xffffff, size: 0.08, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending });
+        const stars = new THREE.Points(starGeometry, starMaterial);
+        scene.add(stars);
+        
+        // animation interpolation variables
+        let currentPositions = new Float32Array(PARTICLE_COUNT * 3);
+        let currentColors = new Float32Array(PARTICLE_COUNT * 3);
+        for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+            currentPositions[i] = initialPositions[i];
+            currentColors[i] = initialColors[i];
+        }
+        let transitionProgress = 1.0; // 1 = fully at current mode
+        let targetModePositions = modePositions.heart;
+        let targetModeColors = modeColors.heart;
+        
+        function switchToMode(mode) {
+            if (mode === currentMode && transitionProgress >= 0.99) return;
+            currentMode = mode;
+            switch(mode) {
+                case 'heart': targetModePositions = modePositions.heart; targetModeColors = modeColors.heart; break;
+                case 'flower': targetModePositions = modePositions.flower; targetModeColors = modeColors.flower; break;
+                case 'saturn': targetModePositions = modePositions.saturn; targetModeColors = modeColors.saturn; break;
+                case 'fireworks': targetModePositions = modePositions.fireworks; targetModeColors = modeColors.fireworks; break;
+                default: targetModePositions = modePositions.heart; targetModeColors = modeColors.heart;
+            }
+            transitionProgress = 0.0;
+        }
+        
+        // --- MediaPipe Hand Tracking ---
+        const videoElement = document.getElementById('webcam');
+        let hands;
+        let lastGesture = 'none';
+        
+        // gesture detection logic based on landmarks
+        function detectGesture(landmarks) {
+            // thumb tip (4), index tip (8), middle tip (12), ring tip (16), pinky tip (20)
+            const thumbTip = landmarks[4];
+            const indexTip = landmarks[8];
+            const middleTip = landmarks[12];
+            const ringTip = landmarks[16];
+            const pinkyTip = landmarks[20];
+            const wrist = landmarks[0];
+            
+            const indexMCP = landmarks[5];
+            const middleMCP = landmarks[9];
+            
+            // pinch: distance between thumb and index tip
+            const pinchDist = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y, thumbTip.z - indexTip.z);
+            // peace: index and middle extended, others folded (check y pos relative to MCP)
+            const indexExtended = indexTip.y < indexMCP.y - 0.02;
+            const middleExtended = middleTip.y < middleMCP.y - 0.02;
+            const ringFolded = ringTip.y > middleMCP.y - 0.01;
+            const pinkyFolded = pinkyTip.y > middleMCP.y - 0.01;
+            
+            // open palm: all tips extended beyond MCP Y threshold
+            const allExtended = indexTip.y < indexMCP.y - 0.03 && middleTip.y < middleMCP.y - 0.03 && ringTip.y < middleMCP.y - 0.02 && pinkyTip.y < middleMCP.y - 0.02;
+            
+            // fist: all tips lower than MCP y (approx)
+            const allFolded = indexTip.y > indexMCP.y + 0.01 && middleTip.y > middleMCP.y + 0.01 && ringTip.y > middleMCP.y + 0.01 && pinkyTip.y > middleMCP.y + 0.01;
+            
+            if (pinchDist < 0.045) return 'pinch';
+            if (indexExtended && middleExtended && !ringFolded === false && pinkyFolded) return 'peace';
+            if (allExtended) return 'open';
+            if (allFolded) return 'fist';
+            return 'none';
+        }
+        
+        function onHandResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                const gesture = detectGesture(landmarks);
+                lastGesture = gesture;
+                
+                // update UI text
+                switch(gesture) {
+                    case 'pinch': break;
+                    case 'peace': break;
+                    case 'open': break;
+                    case 'fist': break;
+                    default: break;
+                }
+                
+                // 1. Pinch -> expansion control (map distance to expansion factor)
+                if (gesture === 'pinch') {
+                    const pinchVal = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y);
+                    // map pinch closeness: typical range 0.02 to 0.1 => expansion 0.6 to 1.8
+                    let exp = 1.0 - (pinchVal - 0.02) * 12;
+                    exp = Math.min(1.8, Math.max(0.6, exp));
+                    targetExpansion = exp;
+                } else {
+                    // slowly return to neutral expansion
+                    targetExpansion = Math.max(0.8, targetExpansion - 0.02);
+                    if (targetExpansion > 1.0) targetExpansion = 1.0;
+                }
+                
+                // 2. Peace -> hue shift accumulation
+                if (gesture === 'peace') {
+                    targetHueShift = (targetHueShift + 0.025) % 1.0;
+                } else {
+                    targetHueShift = targetHueShift * 0.98;
+                }
+                
+                // 3. Open Palm -> cycle template
+                if (gesture === 'open') {
+                    const modes = ['heart', 'flower', 'saturn', 'fireworks'];
+                    let nextIndex = (modes.indexOf(currentMode) + 1) % modes.length;
+                    switchToMode(modes[nextIndex]);
+                    // add small delay to avoid rapid multiple toggles, but MediaPipe runs 30fps, fine
+                    setTimeout(() => {}, 200);
+                }
+                
+                // 4. Fist -> trigger fireworks visual burst (temporary distortion + brightness)
+                if (gesture === 'fist') {
+                    fireworksIntensity = 1.0;
+                    // add extra jitter: we'll handle in animation
+                } else {
+                    fireworksIntensity *= 0.92;
+                }
+                
+                // extra: use wrist position to rotate starfield or camera subtle effect? optional
+                const wristPos = landmarks[0];
+                const normX = (wristPos.x - 0.5) * 2;
+                const normY = (wristPos.y - 0.5) * 2;
+                // slight camera rotation based on wrist for immersion
+                camera.position.x += (normX * 0.5 - camera.position.x) * 0.05;
+                camera.position.y += (-normY * 0.3 - camera.position.y) * 0.05;
+                camera.lookAt(0, 0.5, 0);
+            } else {
+                targetExpansion = Math.max(0.8, targetExpansion - 0.01);
+                targetHueShift *= 0.97;
+                fireworksIntensity *= 0.95;
+            }
+        }
+        
+        function initHandTracking() {
+            hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            hands.onResults(onHandResults);
+            
+            const cameraUtil = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({ image: videoElement });
+                },
+                width: 640,
+                height: 480
+            });
+            cameraUtil.start();
+        }
+        
+        // start webcam
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+                videoElement.srcObject = stream;
+                videoElement.play();
+                initHandTracking();
+            }).catch(err => console.warn("Camera error:", err));
+        } else {
+            console.warn("No camera access");
+        }
+        
+        // --- animation loop and particle morphing + expansion + color shifting ---
+        let lastTimestamp = 0;
+        function animate() {
+            const delta = Math.min(1/30, 0.033);
+            
+            // morph transition (smooth)
+            if (transitionProgress < 1.0) {
+                transitionProgress += delta * 4.5;
+                if (transitionProgress > 1.0) transitionProgress = 1.0;
+                const t = Math.sin(transitionProgress * Math.PI * 0.5); // ease out
+                const posAttr = particleGeometry.attributes.position.array;
+                const colAttr = particleGeometry.attributes.color.array;
+                for (let i = 0; i < PARTICLE_COUNT * 3; i++) {
+                    const targetPos = targetModePositions[i];
+                    const currentBase = currentPositions[i];
+                    const newPos = currentBase + (targetPos - currentBase) * t;
+                    posAttr[i] = newPos;
+                    currentPositions[i] = newPos;
+                    
+                    const targetCol = targetModeColors[i];
+                    const currentColBase = currentColors[i];
+                    const newCol = currentColBase + (targetCol - currentColBase) * t;
+                    colAttr[i] = newCol;
+                    currentColors[i] = newCol;
+                }
+                particleGeometry.attributes.position.needsUpdate = true;
+                particleGeometry.attributes.color.needsUpdate = true;
+                if (transitionProgress >= 0.99) {
+                    // sync fully
+                    for (let i=0;i<PARTICLE_COUNT*3;i++) currentPositions[i] = targetModePositions[i];
+                }
+            }
+            
+            // Expansion effect (scale each particle position radially from center)
+            if (Math.abs(expansionFactor - targetExpansion) > 0.01) {
+                expansionFactor = expansionFactor * 0.92 + targetExpansion * 0.08;
+                const posAttr = particleGeometry.attributes.position.array;
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const ix = i*3, iy = i*3+1, iz = i*3+2;
+                    const ox = currentPositions[ix];
+                    const oy = currentPositions[iy];
+                    const oz = currentPositions[iz];
+                    posAttr[ix] = ox * expansionFactor;
+                    posAttr[iy] = oy * expansionFactor;
+                    posAttr[iz] = oz * expansionFactor;
+                }
+                particleGeometry.attributes.position.needsUpdate = true;
+            } else {
+                // sync to current positions scaled if needed
+                expansionFactor = targetExpansion;
+            }
+            
+            // Fireworks burst effect: add random displacement and increase bloom
+            if (fireworksIntensity > 0.02) {
+                const posAttr = particleGeometry.attributes.position.array;
+                for (let i = 0; i < PARTICLE_COUNT; i+= 13) { // apply to subset for performance and organic feel
+                    const idx = i*3;
+                    posAttr[idx] += (Math.random() - 0.5) * fireworksIntensity * 0.12;
+                    posAttr[idx+1] += (Math.random() - 0.5) * fireworksIntensity * 0.12;
+                    posAttr[idx+2] += (Math.random() - 0.5) * fireworksIntensity * 0.12;
+                }
+                particleGeometry.attributes.position.needsUpdate = true;
+                bloomPass.strength = 1.0 + fireworksIntensity * 1.2;
+                fireworksIntensity *= 0.94;
+            } else {
+                bloomPass.strength = 0.75;
+            }
+            
+            // Color shift via peace gesture: shift hues of colors attribute dynamically (per frame)
+            if (Math.abs(targetHueShift) > 0.001) {
+                colorHueShift = colorHueShift * 0.96 + targetHueShift * 0.04;
+                const colAttr = particleGeometry.attributes.color.array;
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const r = currentColors[i*3];
+                    const g = currentColors[i*3+1];
+                    const b = currentColors[i*3+2];
+                    const color = new THREE.Color(r, g, b);
+                    const hsl = { h: 0, s: 0, l: 0 };
+                    color.getHSL(hsl);
+                    let newHue = (hsl.h + colorHueShift * 0.5) % 1.0;
+                    const newColor = new THREE.Color().setHSL(newHue, hsl.s, hsl.l);
+                    colAttr[i*3] = newColor.r;
+                    colAttr[i*3+1] = newColor.g;
+                    colAttr[i*3+2] = newColor.b;
+                }
+                particleGeometry.attributes.color.needsUpdate = true;
+            }
+            
+            // subtle star rotation
+            stars.rotation.y += 0.0005;
+            stars.rotation.x += 0.0003;
+            
+            effectComposer.render();
+            requestAnimationFrame(animate);
+        }
+        
+        animate();
+        
+        // resize handler
+        window.addEventListener('resize', onWindowResize, false);
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            effectComposer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        // initial mode
+        switchToMode('heart');
+    </script>
+</body>
+</html>
